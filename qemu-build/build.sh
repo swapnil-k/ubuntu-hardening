@@ -3,13 +3,13 @@
 # build.sh — Build a hardened Ubuntu 22.04 golden image using QEMU (GPL v2)
 # Replaces Packer (BSL) with fully open-source tooling
 #
-# Uses Ubuntu 22.04 cloud image (pre-installed) + cloud-init seed for config.
-# No GRUB interaction needed — boots directly and runs Ansible.
+# Runs on: Ubuntu Linux (KVM acceleration required)
 #
 # Output: output/ubuntu22-hardened.vmdk — ready to import into VMware
 #
 # Prerequisites:
-#   brew install qemu ansible sshpass
+#   sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils sshpass ansible python3
+#   sudo usermod -aG kvm $USER   # log out and back in after this
 #   ansible-galaxy install -r ../collections/requirements.yml
 #   ~/.ansible_vault_pass must exist
 # ---------------------------------------------------------------------------
@@ -40,14 +40,34 @@ BUILD_PASS="builder123"
 # ---------------------------------------------------------------------------
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
+check_linux() {
+  if [ "$(uname)" != "Linux" ]; then
+    echo "ERROR: This script is Linux-only. Detected OS: $(uname)"
+    exit 1
+  fi
+}
+
+check_kvm() {
+  if [ ! -e /dev/kvm ]; then
+    echo "ERROR: /dev/kvm not found. Enable KVM:"
+    echo "  sudo usermod -aG kvm \$USER  (then log out and back in)"
+    exit 1
+  fi
+  if [ ! -r /dev/kvm ]; then
+    echo "ERROR: No permission to access /dev/kvm."
+    echo "  sudo usermod -aG kvm \$USER  (then log out and back in)"
+    exit 1
+  fi
+}
+
 check_deps() {
   local missing=()
-  for cmd in qemu-system-x86_64 qemu-img ansible-playbook sshpass python3; do
+  for cmd in qemu-system-x86_64 qemu-img cloud-localds ansible-playbook sshpass python3; do
     command -v "$cmd" &>/dev/null || missing+=("$cmd")
   done
   if [ ${#missing[@]} -gt 0 ]; then
-    echo "ERROR: Missing: ${missing[*]}"
-    echo "Install with: brew install qemu ansible sshpass"
+    echo "ERROR: Missing dependencies: ${missing[*]}"
+    echo "  sudo apt-get install -y qemu-system-x86 qemu-utils cloud-image-utils sshpass ansible python3"
     exit 1
   fi
 }
@@ -93,8 +113,10 @@ cleanup() {
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
-# Step 1 — Check dependencies
+# Step 1 — Checks
 # ---------------------------------------------------------------------------
+check_linux
+check_kvm
 check_deps
 mkdir -p "${SCRIPT_DIR}/iso" "${SCRIPT_DIR}/output" "${SCRIPT_DIR}/tmp"
 
@@ -116,12 +138,11 @@ qemu-img convert -f qcow2 -O qcow2 "${CLOUD_IMG_FILE}" "${DISK_FILE}"
 qemu-img resize "${DISK_FILE}" "${DISK_SIZE}"
 
 # ---------------------------------------------------------------------------
-# Step 4 — Create cloud-init seed ISO (macOS hdiutil — no xorriso needed)
+# Step 4 — Create cloud-init seed ISO
 # ---------------------------------------------------------------------------
 log "Creating cloud-init seed ISO..."
 mkdir -p "${SEED_DIR}"
 
-# Hashed password for builder123
 BUILD_PASS_HASH=$(python3 -c "import crypt; print(crypt.crypt('${BUILD_PASS}', crypt.mksalt(crypt.METHOD_SHA512)))")
 
 cat > "${SEED_DIR}/user-data" << EOF
@@ -152,21 +173,18 @@ instance-id: ubuntu-hardened-build
 local-hostname: ubuntu-hardened
 EOF
 
-# Use hdiutil on macOS to create the seed ISO (no xorriso needed)
-hdiutil makehybrid -o "${SEED_ISO}" -hfs -joliet -iso \
-  -default-volume-name cidata "${SEED_DIR}" -quiet
-
-log "Seed ISO created: ${SEED_ISO}"
+cloud-localds "${SEED_ISO}" "${SEED_DIR}/user-data" "${SEED_DIR}/meta-data"
+log "Seed ISO created."
 
 # ---------------------------------------------------------------------------
 # Step 5 — Boot VM
 # ---------------------------------------------------------------------------
-log "Starting VM..."
+log "Starting VM (KVM accelerated)..."
 qemu-system-x86_64 \
   -name "${VM_NAME}" \
   -m "${MEMORY}" \
   -smp "${CPUS}" \
-  -machine type=q35,accel=hvf \
+  -machine type=q35,accel=kvm \
   -cpu host \
   -drive file="${DISK_FILE}",if=virtio,format=qcow2 \
   -drive file="${SEED_ISO}",media=cdrom,readonly=on \
@@ -223,5 +241,5 @@ log ""
 log "=========================================="
 log "Build complete!"
 log "Output: ${VMDK_FILE}"
-log "Import into VMware: File → Import or Open"
+log "Import into VMware: File → New VM → Use existing virtual disk"
 log "=========================================="
