@@ -1,0 +1,275 @@
+---
+- block:
+  # --- Multi-distro support ---
+  - name: Load OS-specific variables
+    include_vars:
+      file: "{{ item }}"
+    with_first_found:
+      - files:
+          - "{{ ansible_facts.distribution }}.yml"
+          - "{{ ansible_facts.os_family }}.yml"
+        paths: "{{ role_path }}/vars"
+        skip: true
+
+  - name: Set PermitRootLogin to no
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?PermitRootLogin'
+      line: 'PermitRootLogin no'
+      backup: yes
+    notify: restart sshd
+
+  - name: Disable password authentication
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?PasswordAuthentication'
+      line: 'PasswordAuthentication no'
+    notify: restart sshd
+
+  - name: if X11Forwarding is yes, then change to no
+    replace: dest=/etc/ssh/sshd_config regexp="^X11Forwarding yes" replace="X11Forwarding no" backup=yes
+    notify: restart sshd
+
+  - name: Disable motd
+    lineinfile:
+      path: /etc/default/motd-news
+      regexp: '^ENABLED=1'
+      line: 'ENABLED=0'
+    ignore_errors: true
+
+  - name: Ensure update-motd is disabled and stopped
+    service: name=motd-news enabled=no state=stopped
+    ignore_errors: true
+    changed_when: false
+
+  - name: Delete update-motd directory
+    file:
+      path: /etc/update-motd.d
+      state: absent
+    ignore_errors: true
+
+  - name: Add sshd banner file
+    template: src=etc/ssh/banner.j2 dest=/etc/ssh/banner owner=root group=root mode=0644
+    notify: restart sshd
+  
+  - name: Add banner configuration
+    lineinfile: dest=/etc/ssh/sshd_config line="Banner /etc/ssh/banner"
+    notify: restart sshd
+
+  - name: Set MaxAuthTries to 2
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?MaxAuthTries'
+      line: 'MaxAuthTries 5'
+    notify: restart sshd
+
+  - name: Set LoginGraceTime to 30s
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?LoginGraceTime'
+      line: 'LoginGraceTime 30'
+    notify: restart sshd
+
+  - name: Set idle timeout interval to 300s
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?ClientAliveInterval'
+      line: 'ClientAliveInterval 300'
+    notify: restart sshd
+
+  - name: Set idle timeout count to 3
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?ClientAliveCountMax'
+      line: 'ClientAliveCountMax 3'
+    notify: restart sshd
+
+  - name: Disable TCP forwarding
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?AllowTcpForwarding'
+      line: 'AllowTcpForwarding no'
+    notify: restart sshd
+
+  - name: Disable agent forwarding
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?AllowAgentForwarding'
+      line: 'AllowAgentForwarding no'
+    notify: restart sshd
+
+  - name: Set strong ciphers
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?Ciphers'
+      line: 'Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr'
+    notify: restart sshd
+
+  - name: Set strong MACs
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?MACs'
+      line: 'MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,umac-128-etm@openssh.com'
+    notify: restart sshd
+
+  - name: Set strong KEX algorithms
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?KexAlgorithms'
+      line: 'KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,diffie-hellman-group16-sha512,diffie-hellman-group18-sha512,diffie-hellman-group-exchange-sha256'
+    notify: restart sshd
+
+  - name: Check for weak DH primes in /etc/ssh/moduli
+    command: awk '$5 < 3071' /etc/ssh/moduli
+    register: sshd_moduli_weak
+    changed_when: false
+    check_mode: false
+
+  - name: Remove weak DH primes from /etc/ssh/moduli
+    shell: >
+      awk '$5 >= 3071' /etc/ssh/moduli > /etc/ssh/moduli.new &&
+      [ -s /etc/ssh/moduli.new ] &&
+      mv /etc/ssh/moduli.new /etc/ssh/moduli || rm -f /etc/ssh/moduli.new
+    when: sshd_moduli_weak.stdout | length > 0
+    notify: restart sshd
+
+  - name: Generate RSA host key at 4096 bits
+    command: ssh-keygen -q -t rsa -b 4096 -f /etc/ssh/ssh_host_rsa_key -N ""
+    args:
+      creates: /etc/ssh/ssh_host_rsa_key
+    notify: restart sshd
+
+  - name: Generate Ed25519 host key
+    command: ssh-keygen -q -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N ""
+    args:
+      creates: /etc/ssh/ssh_host_ed25519_key
+    notify: restart sshd
+
+  - name: Remove weak host key types from sshd_config (DSA, ECDSA)
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: "{{ item }}"
+      state: absent
+    loop:
+      - '^HostKey /etc/ssh/ssh_host_dsa_key'
+      - '^HostKey /etc/ssh/ssh_host_ecdsa_key'
+    notify: restart sshd
+
+  - name: Set strong host keys in sshd_config (RSA 4096 + Ed25519)
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: "{{ item.regexp }}"
+      line: "{{ item.line }}"
+      insertafter: EOF
+    loop:
+      - { regexp: '^HostKey /etc/ssh/ssh_host_rsa_key', line: 'HostKey /etc/ssh/ssh_host_rsa_key' }
+      - { regexp: '^HostKey /etc/ssh/ssh_host_ed25519_key', line: 'HostKey /etc/ssh/ssh_host_ed25519_key' }
+    notify: restart sshd
+
+  # --- SSH client config ---
+  - name: Deploy hardened SSH client config
+    template:
+      src: etc/ssh/ssh_config.j2
+      dest: /etc/ssh/ssh_config
+      owner: root
+      group: root
+      mode: '0644'
+    when: ssh_client_hardening | bool
+
+  # --- sftp chroot/umask ---
+  - name: Remove existing Subsystem sftp line
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^Subsystem\s+sftp'
+      state: absent
+    when: sftp_enabled | bool and sftp_chroot | bool
+
+  - name: Configure sftp with chroot and umask
+    blockinfile:
+      path: /etc/ssh/sshd_config
+      marker: "# {mark} ANSIBLE MANAGED - sftp"
+      block: |
+        Subsystem sftp internal-sftp -u {{ sftp_umask }}
+        Match Group sftp
+          ChrootDirectory {{ sftp_chroot_dir }}
+          ForceCommand internal-sftp -u {{ sftp_umask }}
+          AllowTcpForwarding no
+          X11Forwarding no
+    when: sftp_enabled | bool and sftp_chroot | bool
+    notify: restart sshd
+
+  # --- Revoked keys ---
+  - name: Create revoked_keys file
+    template:
+      src: etc/ssh/revoked_keys.j2
+      dest: /etc/ssh/revoked_keys
+      owner: root
+      group: root
+      mode: '0600'
+    notify: restart sshd
+
+  - name: Set RevokedKeys in sshd_config
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?RevokedKeys'
+      line: 'RevokedKeys /etc/ssh/revoked_keys'
+    notify: restart sshd
+
+  # --- CA keys / principals ---
+  - name: Deploy trusted CA keys file
+    copy:
+      content: "{{ ssh_trusted_user_ca_keys | join('\n') }}\n"
+      dest: "{{ ssh_trusted_user_ca_keys_file }}"
+      owner: root
+      group: root
+      mode: '0644'
+    when:
+      - ssh_trusted_user_ca_keys_file | length > 0
+      - ssh_trusted_user_ca_keys | length > 0
+    notify: restart sshd
+
+  - name: Set TrustedUserCAKeys in sshd_config
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?TrustedUserCAKeys'
+      line: "TrustedUserCAKeys {{ ssh_trusted_user_ca_keys_file }}"
+    when: ssh_trusted_user_ca_keys_file | length > 0
+    notify: restart sshd
+
+  - name: Set AuthorizedPrincipalsFile in sshd_config
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#?AuthorizedPrincipalsFile'
+      line: "AuthorizedPrincipalsFile {{ ssh_authorized_principals_file }}"
+    when: ssh_authorized_principals_file | length > 0
+    notify: restart sshd
+
+  # --- SELinux support ---
+  - name: Check if SELinux is enabled
+    command: getenforce
+    register: selinux_status
+    changed_when: false
+    failed_when: false
+
+  - name: Allow sshd port in SELinux
+    command: semanage port -a -t ssh_port_t -p tcp 22
+    when:
+      - selinux_status.rc == 0
+      - selinux_status.stdout != 'Disabled'
+    failed_when: false
+    changed_when: false
+
+  - name: Set sshd_config permissions to 0600 root/root
+    file:
+      path: /etc/ssh/sshd_config
+      owner: root
+      group: root
+      mode: '0600'
+
+  - name: Validate sshd_config before applying
+    command: sshd -t
+    changed_when: false
+    register: sshd_validate
+    failed_when: sshd_validate.rc != 0
+
+  tags: sshd

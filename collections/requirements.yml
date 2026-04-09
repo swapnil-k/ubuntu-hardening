@@ -1,0 +1,5 @@
+---
+roles:
+  - name: UBUNTU22-CIS
+    src: https://github.com/ansible-lockdown/UBUNTU22-CIS
+    version: main

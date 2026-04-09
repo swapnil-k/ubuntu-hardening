@@ -1,0 +1,5 @@
+{% if ssh_server_revoked_keys | length > 0 %}
+{% for key in ssh_server_revoked_keys %}
+{{ key }}
+{% endfor %}
+{% endif %}

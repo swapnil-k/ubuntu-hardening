@@ -1,0 +1,168 @@
+---
+# -----------------------------------------------------------------------
+# ansible-lockdown UBUNTU22-CIS — tuning for >90% CIS score
+# https://github.com/ansible-lockdown/UBUNTU22-CIS
+# -----------------------------------------------------------------------
+
+# Run both Level 1 and Level 2 controls
+ubtu22cis_level_1: true
+ubtu22cis_level_2: true
+
+# -----------------------------------------------------------------------
+# Safety — keep these false on cloud/DigitalOcean servers
+# -----------------------------------------------------------------------
+
+# GRUB password would require console access to recover — skip it
+ubtu22cis_set_grub_password: false
+ubtu22cis_rule_1_4_1: false
+
+# Allows high-disruption changes — needed for pam-auth-update (faillock) and
+# chage on existing users. Filesystem remounting is controlled by rule-level vars.
+ubtu22cis_disruption_high: true
+
+# Root password — not applicable on cloud servers (root SSH is disabled,
+# DigitalOcean console provides emergency access without a password)
+ubtu22cis_rule_5_4_2_4: false
+
+# Connecting user password check — ubuntu is a Multipass-only temp user,
+# sysadmin is the real admin user and has a password via vault
+ubtu22cis_rule_5_2_4: false
+
+# -----------------------------------------------------------------------
+# Section 1 — Initial Setup
+# -----------------------------------------------------------------------
+
+# Filesystem — disable unused kernel modules
+ubtu22cis_rule_1_1_1_1: true   # cramfs
+ubtu22cis_rule_1_1_1_2: true   # freevxfs
+ubtu22cis_rule_1_1_1_3: true   # hfs
+ubtu22cis_rule_1_1_1_4: true   # hfsplus
+ubtu22cis_rule_1_1_1_5: true   # jffs2
+ubtu22cis_rule_1_1_1_6: true   # squashfs (set false if snaps are needed)
+ubtu22cis_rule_1_1_1_7: true   # udf
+ubtu22cis_rule_1_1_1_8: true   # usb-storage
+
+# AppArmor
+ubtu22cis_rule_1_3_1_1: true
+ubtu22cis_rule_1_3_1_2: true
+ubtu22cis_rule_1_3_1_3: true
+ubtu22cis_rule_1_3_1_4: true
+
+# AIDE — file integrity monitoring
+ubtu22cis_config_aide: true
+ubtu22cis_aide_cron:
+  cron_user: root
+  cron_file: aide
+  aide_job: '/usr/bin/aide.wrapper --config /etc/aide/aide.conf --check'
+  cron_hour: "5"
+  cron_minute: "0"
+  cron_day: "*"
+
+# -----------------------------------------------------------------------
+# Section 2 — Services (disable unnecessary)
+# -----------------------------------------------------------------------
+
+ubtu22cis_rule_2_1_1_1: true   # time sync configured
+ubtu22cis_time_sync_tool: "chrony"   # chrony is preferred on Ubuntu 22
+
+ubtu22cis_xwindows_required: false   # server — no GUI needed
+
+# -----------------------------------------------------------------------
+# Section 3 — Network Configuration
+# -----------------------------------------------------------------------
+
+# IPv6 — disable if not used (safe default for most cloud servers)
+ubtu22cis_ipv6_required: false
+
+# -----------------------------------------------------------------------
+# Section 4 — Host Based Firewall
+# -----------------------------------------------------------------------
+
+ubtu22cis_firewall: "none"
+
+# UFW default policies
+ubtu22cis_ufw_allow_out_policy: allow
+ubtu22cis_ufw_allow_in_policy: deny
+
+# Ports to allow inbound (SSH must be here or you'll be locked out)
+ubtu22cis_ufw_rules:
+  - rule: allow
+    to_port: "22"
+    protocol: tcp
+    comment: "Allow SSH"
+
+# -----------------------------------------------------------------------
+# Section 5 — Access, Authentication and Authorization
+# -----------------------------------------------------------------------
+
+# Sudo
+ubtu22cis_sudo_log: true
+ubtu22cis_sudo_log_file: /var/log/sudo.log
+ubtu22cis_sudoers_use_pty: true
+
+# SSH — must match or be stricter than our sshd role values
+# CIS will enforce these; they align with what roles/sshd already sets
+ubtu22cis_sshd:
+  log_level: "INFO"
+  max_auth_tries: 4
+  allow_users: "{{ admin_user }}"
+  allow_groups: "sudo"
+  deny_users: "root"
+  deny_groups: ""
+  ignore_rhosts: "yes"
+  host_based_auth: "no"
+  permit_root_login: "no"
+  permit_empty_passwords: "no"
+  permit_user_environment: "no"
+  use_pam: "yes"
+  x11_forwarding: "no"
+  print_last_log: "yes"
+  max_sessions: 4
+  client_alive_interval: 300
+  client_alive_count_max: 3
+  login_grace_time: 60
+  banner: /etc/ssh/banner
+  max_startups: "10:30:60"
+  tcp_keep_alive: "no"
+
+# PAM — password policy
+ubtu22cis_pwquality:
+  - key: minlen
+    value: "14"
+  - key: minclass
+    value: "4"
+  - key: dcredit
+    value: "-1"
+  - key: ucredit
+    value: "-1"
+  - key: ocredit
+    value: "-1"
+  - key: lcredit
+    value: "-1"
+
+# Password aging
+ubtu22cis_pass_max_days: 365
+ubtu22cis_pass_min_days: 1
+ubtu22cis_pass_warn_age: 7
+ubtu22cis_pass_lock_time: 900
+
+# Account lockout (faillock)
+ubtu22cis_faillock:
+  deny: 3   # CIS profile expects deny <= 4
+  fail_interval: 900
+  unlock_time: 900
+
+# -----------------------------------------------------------------------
+# Section 6 — System Maintenance
+# -----------------------------------------------------------------------
+
+# Logging
+ubtu22cis_syslog: "rsyslog"
+ubtu22cis_remote_log_server: false   # set true if you have a syslog server
+
+# Auditd
+ubtu22cis_auditd_enabled: true
+ubtu22cis_audit_log_size: 8192
+ubtu22cis_audit_action_mail_acct: root
+ubtu22cis_audit_space_left_action: email
+ubtu22cis_auditd_extra_conf: []

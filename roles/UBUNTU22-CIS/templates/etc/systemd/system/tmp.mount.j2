@@ -1,0 +1,17 @@
+[Unit]
+Description=Temporary Directory /tmp
+ConditionPathIsSymbolicLink=!/tmp
+DefaultDependencies=no
+Conflicts=umount.target
+Before=local-fs.target umount.target
+After=swap.target
+
+[Mount]
+What=tmpfs
+Where=/tmp
+Type=tmpfs
+
+Options: "{{ mount_point_fs_and_options[mount_point]['options'] | unique | join(',') }}"
+
+[Install]
+WantedBy=local-fs.target

@@ -1,0 +1,8 @@
+---
+ssh_service_name: sshd
+ssh_owner: root
+ssh_group: root
+sshd_moduli_file: /etc/ssh/moduli
+ssh_client_config_file: /etc/ssh/ssh_config
+ssh_server_config_file: /etc/ssh/sshd_config
+ssh_pam_support: true

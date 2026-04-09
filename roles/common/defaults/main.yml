@@ -1,0 +1,33 @@
+---
+
+common_packages:
+  # Locale support
+  - locales
+  # Debugging tools
+  - vim
+  - curl
+  - net-tools           # netstat
+  - dnsutils            # nslookup, dig
+  - atop
+  - htop
+  - btop
+  - ncdu
+  # Development tools
+  - git
+  - make
+  # Network management
+  - network-manager     # nmcli
+  # System utilities
+  - bash-completion
+  - unzip
+  - tree
+  - nfs-common
+
+admin_user: sysadmin
+
+common_directories: /var/log/messages
+sys_timezone: Asia/Dubai
+common_iptables_enabled: true
+common_legacy_sudoers: false
+common_tcp_keepalive_time: 60
+fs_file_max: 1048576

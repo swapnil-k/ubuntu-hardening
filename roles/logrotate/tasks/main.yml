@@ -1,0 +1,46 @@
+---
+- block:
+
+  - name: Install logrotate
+    apt:
+      name: logrotate
+      state: present
+
+  - name: Deploy /etc/logrotate.conf
+    copy:
+      src: etc/logrotate.conf
+      dest: /etc/logrotate.conf
+      owner: root
+      group: root
+      mode: '0644'
+
+  - name: Remove default cron.daily logrotate job (replaced by custom script)
+    file:
+      path: /etc/cron.daily/logrotate
+      state: absent
+
+  - name: Deploy custom logrotate script to /opt/logrotate.sh
+    copy:
+      src: opt/logrotate.sh
+      dest: /opt/logrotate.sh
+      owner: root
+      group: root
+      mode: '0750'
+
+  - name: Create /opt/log directory for application logs
+    file:
+      path: /opt/log
+      owner: root
+      group: adm
+      mode: '0755'
+      state: directory
+
+  - name: Create logrotate cron job to run daily at 2am
+    cron:
+      name: logrotate
+      hour: "2"
+      minute: "0"
+      user: root
+      job: /opt/logrotate.sh
+
+  tags: logrotate

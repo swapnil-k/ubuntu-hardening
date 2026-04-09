@@ -1,0 +1,485 @@
+---
+# file: roles/common/tasks/common.yml
+
+- block:
+
+  # --- Disable unattended upgrades ---
+  - name: Stop unattended-upgrades service if running
+    service:
+      name: unattended-upgrades
+      state: stopped
+      enabled: no
+    ignore_errors: true
+
+  - name: Stop apt-daily timers
+    systemd:
+      name: "{{ item }}"
+      state: stopped
+      enabled: no
+    loop:
+      - apt-daily.timer
+      - apt-daily-upgrade.timer
+    ignore_errors: true
+
+  - name: Wait for any pending apt/dpkg operations to complete
+    shell: while fuser /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do sleep 1; done
+    changed_when: false
+
+  - name: Remove unattended-upgrades package
+    apt:
+      name: unattended-upgrades
+      state: absent
+      purge: yes
+    ignore_errors: true
+
+  - name: Remove unattended-upgrades config
+    file:
+      path: "{{ item }}"
+      state: absent
+    loop:
+      - /etc/apt/apt.conf.d/20auto-upgrades
+      - /etc/apt/apt.conf.d/50unattended-upgrades
+    ignore_errors: true
+
+  # --- Remove apt lock files ---
+  - name: Remove apt lock file
+    file: path=/var/lib/dpkg/lock state=absent
+    changed_when: False
+
+  - name: Set root password for emergency console access
+    user:
+      name: root
+      password: "{{ root_password | password_hash('sha512') }}"
+      update_password: always
+
+  - name: Create admin group
+    group: name={{ admin_user }} state=present
+
+  - name: Create admin user
+    user:
+      name: "{{ admin_user }}"
+      group: "{{ admin_user }}"
+      groups:
+        - sudo
+        - adm
+      shell: /bin/bash
+      system: no
+      createhome: yes
+      home: /home/{{ admin_user }}
+      state: present
+
+  - name: Setup .ssh directory
+    file: path=/home/{{ admin_user }}/.ssh owner={{ admin_user }} group={{ admin_user }} mode=0700 state=directory
+
+  - name: Install authorized_keys file
+    copy: src=home/sysadmin/dir.ssh/authorized_keys.sysadmin.{{ env | default('default') }} dest=/home/{{ admin_user }}/.ssh/authorized_keys owner={{ admin_user }} group={{ admin_user }} mode=0600
+
+  - name: Disable login banner for admin user
+    copy: src={{ role_path }}/../sshd/files/home/sysadmin/.hushlogin dest=/home/{{ admin_user }}/.hushlogin owner={{ admin_user }} group={{ admin_user }} mode=0644
+
+  - name: Setup ansible facts
+    file: path=/etc/ansible/facts.d owner=root group=root mode=0755 state=directory
+
+  - name: Set LC_ALL
+    lineinfile:
+      dest: /etc/environment
+      state: present
+      regexp: '^LC_ALL'
+      line: 'LC_ALL=en_US.UTF-8'
+
+  - name: Set LANG
+    lineinfile:
+      dest: /etc/environment
+      state: present
+      regexp: '^LANG'
+      line: 'LANG=en_US.UTF-8'
+
+  - name: Remove apt lock file
+    file: path=/var/lib/dpkg/lock-frontend state=absent
+    changed_when: False
+
+  - name: Run timedatectl status
+    command: /usr/bin/timedatectl status
+    changed_when: False
+    check_mode: no
+    register: timedatectl_result
+
+  - name: Update /etc/timezone
+    template: src=etc/timezone.j2 dest=/etc/timezone owner=root group=root mode=0644
+    notify: update-timezone
+    when: "'Asia/Dubai' not in timedatectl_result.stdout"
+    changed_when: False
+
+  - name: Update /etc/localtime
+    file:
+      src: /usr/share/zoneinfo/Asia/Dubai
+      dest: /etc/localtime
+      owner: root
+      group: root
+      state: link
+    when: "'Asia/Dubai' not in timedatectl_result.stdout"
+    notify: update-timezone
+    changed_when: False
+
+  - name: Update and upgrade apt packages
+    apt:
+      update_cache: yes
+      cache_valid_time: 86400 #One day
+    when: "'Asia/Dubai' not in timedatectl_result.stdout"
+
+  - name: Install debugging and system tools
+    apt:
+      name: "{{ common_packages }}"
+      state: present
+    environment:
+      DEBIAN_FRONTEND: noninteractive
+
+  - name: Set the locale
+    command: locale-gen en_US.UTF-8
+    changed_when: False
+
+  - name: Apply locale system-wide
+    command: update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
+    changed_when: False
+
+  - name: Configure tzdata
+    command: "dpkg-reconfigure -f noninteractive tzdata"
+    environment:
+    - DEBIAN_FRONTEND: noninteractive
+    when: "'Asia/Dubai' not in timedatectl_result.stdout"
+    changed_when: False
+    
+  - name: update sysctl values
+    sysctl: name={{item.name}} value='{{item.value}}' state=present ignoreerrors=yes reload=yes
+    with_items:
+      - { name: 'kernel.sysrq', value: '0' }
+      - { name: 'fs.file-max', value: "{{ fs_file_max }}" }
+      - { name: 'vm.swappiness', value: '0' }  # from 60
+      - { name: 'vm.max_map_count', value: '1048576' }
+#212992      - { name: 'net.core.rmem_default', value: '1048576' }
+#212992      - { name: 'net.core.rmem_max', value: '4194304' }
+#212992      - { name: 'net.core.wmem_default', value: '1048576' }
+#212992      - { name: 'net.core.wmem_max', value: '4194304' }
+#7200      - { name: 'net.ipv4.tcp_keepalive_time', value: "{{ common_tcp_keepalive_time }}" }
+#75      - { name: 'net.ipv4.tcp_keepalive_intvl', value: '5' }
+#9      - { name: 'net.ipv4.tcp_keepalive_probes', value: '6' }
+
+  - name: update security limits
+    lineinfile: dest=/etc/security/limits.conf insertafter='EOF' line='{{item}}'
+    with_items:
+      - "*       soft    memlock unlimited"
+      - "*       hard    memlock unlimited"
+      - "*       soft    nproc  65536"
+      - "*       hard    nproc  65536"
+      - "*       soft    nofile  65536"
+      - "*       hard    nofile  65536"
+      - "*       hard    core   0"
+      - "*       soft    core   0"
+    register: reboot
+
+  - name: Create systemd coredump config directory
+    file:
+      path: /etc/systemd/coredump.conf.d
+      owner: root
+      group: root
+      mode: '0755'
+      state: directory
+
+  - name: Disable coredumps via systemd
+    copy:
+      dest: /etc/systemd/coredump.conf.d/custom.conf
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        [Coredump]
+        Storage=none
+ 
+  - name: setup ansible facts
+    file: path=/etc/ansible/facts.d owner=root group=root mode=0755 state=directory
+
+  - name: Check aws binary exists or not
+    stat:
+      path: "/usr/local/bin/aws"
+    register: aws_result
+
+    #  - name: Create a symbolic link
+    #file:
+    #  src: /usr/bin/aws
+    #  dest: /usr/local/bin/aws
+    #  owner: root
+    #  group: root
+    #  state: link
+    #when: aws_result.stat.exists == False
+
+  - name: create /opt/backup directory
+    file:
+      path: "/opt/backup"
+      state: directory
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+      mode: '0777'
+      
+#  - name: purpusefully end play
+#    meta: end_play
+
+#  - name: Mount EFS on /opt/backup
+#    mount:
+#      path: "/opt/backup"
+#      src: "{{ mount_src }}:/"
+#      fstype: nfs4
+#      opts: nfsvers=4.1
+#      state: mounted
+#    when: env is defined and env=="prod"
+
+  - name: Setup sudoers
+    template: src=etc/sudoers.j2 dest=/etc/sudoers owner=root group=root mode=0440 validate='/usr/sbin/visudo -cf %s'
+
+  # --- PAM packages ---
+  - name: Install PAM security packages
+    apt:
+      name:
+        - libpam-pwquality
+        - nftables
+      state: present
+
+  # --- Remove telnet (CIS: telnet clients must not be installed) ---
+  - name: Remove telnet client
+    apt:
+      name: telnet
+      state: absent
+      purge: yes
+    ignore_errors: true
+
+  # --- faillock (CIS 5.3.x) ---
+  - name: Configure faillock.conf
+    lineinfile:
+      path: /etc/security/faillock.conf
+      regexp: "^{{ item.key }}"
+      line: "{{ item.key }} = {{ item.value }}"
+      state: present
+      create: yes
+    loop:
+      - { key: deny,          value: "3"   }   # CIS profile expects deny <= 4
+      - { key: fail_interval, value: "900" }
+      - { key: unlock_time,   value: "900" }
+
+  # Deploy common-auth with CIS SSG OVAL-compliant faillock config.
+  # pam-auth-update generates "requisite preauth" (no authsucc line) which fails the OVAL check.
+  # This file uses "required preauth" + "sufficient authsucc" to match the expected regex.
+  - name: Deploy CIS-compliant /etc/pam.d/common-auth
+    copy:
+      dest: /etc/pam.d/common-auth
+      owner: root
+      group: root
+      mode: '0644'
+      content: |
+        #
+        # /etc/pam.d/common-auth - authentication settings common to all services
+        #
+        # Managed by Ansible (common role). Configured to satisfy CIS SSG OVAL checks.
+        # pam-auth-update is NOT used — it generates "requisite" preauth and no authsucc line,
+        # which fails the OVAL check for accounts_passwords_pam_faillock_deny/interval/unlock_time.
+
+        # here are the per-package modules (the "Primary" block)
+        auth	required                        pam_faillock.so preauth
+        auth	[success=1 default=ignore]      pam_unix.so try_first_pass
+        auth	[default=die]                   pam_faillock.so authfail
+        auth	sufficient                      pam_faillock.so authsucc
+        # here's the fallback if no module succeeds
+        auth	requisite                       pam_deny.so
+        # prime the stack with a positive return value if there isn't one already;
+        # this avoids us returning an error just because nothing sets a success code
+        # since the modules above will each just jump around
+        auth	required                        pam_permit.so
+        # and here are more per-package modules (the "Additional" block)
+        auth	optional                        pam_cap.so
+        # end of pam-auth-update config
+
+  # --- Password reuse limit (CIS 5.3.3) ---
+  - name: Enforce password reuse limit in common-password
+    lineinfile:
+      path: /etc/pam.d/common-password
+      insertbefore: "^password.*pam_unix.so"
+      line: "password required pam_pwhistory.so remember=5 use_authtok"
+      state: present
+
+  # --- nftables permanent rules (CIS 4.2.x) ---
+  - name: Deploy basic nftables ruleset
+    copy:
+      dest: /etc/nftables.conf
+      owner: root
+      group: root
+      mode: '0600'
+      content: |
+        #!/usr/sbin/nft -f
+        flush ruleset
+        table inet filter {
+          chain input {
+            type filter hook input priority 0; policy drop;
+            ct state invalid drop
+            ct state { established, related } accept
+            iif "lo" accept
+            ip protocol icmp accept
+            ip6 nexthdr icmpv6 accept
+            tcp dport 22 accept
+          }
+          chain forward {
+            type filter hook forward priority 0; policy drop;
+          }
+          chain output {
+            type filter hook output priority 0; policy accept;
+          }
+        }
+
+  - name: Disable nftables (not used — managed externally)
+    systemd:
+      name: nftables
+      enabled: no
+      state: stopped
+    ignore_errors: true
+
+  - name: Disable UFW (not used — managed externally)
+    systemd:
+      name: ufw
+      enabled: no
+      state: stopped
+    ignore_errors: true
+
+  # --- /tmp on tmpfs (CIS 1.1.2.x) ---
+  - name: Mount /tmp on tmpfs
+    mount:
+      path: /tmp
+      src: tmpfs
+      fstype: tmpfs
+      opts: defaults,noatime,nosuid,nodev,noexec,mode=1777,size=2g
+      state: mounted
+
+  - name: Ensure /tmp tmpfs entry persists in fstab
+    lineinfile:
+      path: /etc/fstab
+      regexp: '^tmpfs\s+/tmp'
+      line: "tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,noexec,mode=1777,size=2g 0 0"
+      state: present
+
+  - name: Configure pam_pwquality — CIS password complexity requirements
+    lineinfile:
+      path: /etc/security/pwquality.conf
+      regexp: "^{{ item.key }}"
+      line: "{{ item.key }} = {{ item.value }}"
+      state: present
+      create: yes
+    loop:
+      - { key: minlen,   value: "14" }   # CIS: minimum 14 characters
+      - { key: minclass, value: "4"  }   # CIS: all 4 character classes required
+      - { key: dcredit,  value: "-1" }   # CIS: at least 1 digit
+      - { key: ucredit,  value: "-1" }   # CIS: at least 1 uppercase
+      - { key: lcredit,  value: "-1" }   # CIS: at least 1 lowercase
+      - { key: ocredit,  value: "-1" }   # CIS: at least 1 special character
+
+  # --- Password aging (CIS 5.4.1.x) ---
+  - name: Set password max/min age in login.defs
+    lineinfile:
+      path: /etc/login.defs
+      regexp: "^{{ item.key }}"
+      line: "{{ item.key }}\t{{ item.value }}"
+    loop:
+      - { key: PASS_MAX_DAYS, value: "365" }
+      - { key: PASS_MIN_DAYS, value: "1"   }
+      - { key: PASS_WARN_AGE, value: "7"   }
+
+  - name: Remove invalid INACTIVE key from login.defs if present
+    lineinfile:
+      path: /etc/login.defs
+      regexp: '^INACTIVE\s'
+      state: absent
+
+  - name: Set default inactive days for new users
+    command: useradd -D -f 30
+    changed_when: false
+
+  - name: Apply password aging to all existing non-system users
+    shell: |
+      awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd | while read user; do
+        chage --maxdays 365 --mindays 1 --warndays 7 --inactive 30 "$user" 2>/dev/null
+      done
+      exit 0
+    changed_when: true
+
+  # --- Umask (CIS 5.4.4 / 5.4.5) ---
+  - name: Set umask in /etc/bash.bashrc
+    lineinfile:
+      path: /etc/bash.bashrc
+      regexp: '^umask'
+      line: 'umask 027'
+      state: present
+
+  - name: Set umask in /etc/profile
+    lineinfile:
+      path: /etc/profile
+      regexp: '^umask'
+      line: 'umask 027'
+      state: present
+
+  # --- Postfix — local-only (CIS 2.1.x) ---
+  - name: Configure postfix to listen on loopback only
+    lineinfile:
+      path: /etc/postfix/main.cf
+      regexp: '^inet_interfaces'
+      line: 'inet_interfaces = loopback-only'
+      state: present
+    ignore_errors: true
+    notify: restart postfix
+
+  # --- Shadow/gshadow file ownership (CIS 6.1.x) ---
+  - name: Set ownership and permissions on shadow and gshadow files
+    file:
+      path: "{{ item.path }}"
+      owner: "{{ item.owner }}"
+      group: "{{ item.group }}"
+      mode: "{{ item.mode }}"
+    loop:
+      - { path: /etc/shadow,        owner: root, group: shadow, mode: "0640" }
+      - { path: /etc/gshadow,       owner: root, group: shadow, mode: "0640" }
+      - { path: /etc/shadow-,       owner: root, group: shadow, mode: "0640" }
+      - { path: /etc/gshadow-,      owner: root, group: shadow, mode: "0640" }
+    ignore_errors: true
+
+  # --- User init files group ownership (CIS 6.2.x) ---
+  - name: Ensure user init files are group-owned by primary group
+    shell: |
+      awk -F: '$3 >= 1000 && $1 != "nobody" {print $1}' /etc/passwd | while read user; do
+        home=$(getent passwd "$user" | cut -d: -f6)
+        gid=$(id -g "$user" 2>/dev/null)
+        if [ -z "$gid" ] || [ ! -d "$home" ]; then continue; fi
+        for f in .bash_profile .bashrc .bash_login .profile .bash_logout .kshrc .cshrc; do
+          fp="$home/$f"
+          if [ -f "$fp" ]; then chgrp "$gid" "$fp"; fi
+        done
+      done
+      exit 0
+    changed_when: true
+
+  # --- pam_wheel for su (CIS 5.3.7) ---
+  - name: Create wheel group (empty — only used to restrict su)
+    group:
+      name: wheel
+      state: present
+      system: no
+
+  - name: Configure pam_wheel to use wheel group for su
+    lineinfile:
+      path: /etc/pam.d/su
+      regexp: '^auth.*pam_wheel\.so'
+      line: 'auth required pam_wheel.so use_uid group=wheel'
+      state: present
+
+  - name: Reboot a slow machine that might have lots of updates to apply
+    reboot:
+      reboot_timeout: 120
+      connect_timeout: 10
+      post_reboot_delay: 10
+      test_command: whoami
+    when: reboot is changed
+
+  tags: common

@@ -1,0 +1,20 @@
+---
+# SSH client hardening
+ssh_client_hardening: true
+
+# sftp
+sftp_enabled: true
+sftp_chroot: true
+sftp_chroot_dir: /home/%u
+sftp_umask: "0027"
+
+# Revoked keys — list of public keys to revoke
+ssh_server_revoked_keys: []
+
+# CA keys — leave empty to disable
+ssh_trusted_user_ca_keys_file: ""
+ssh_trusted_user_ca_keys: []
+
+# Authorized principals — leave empty to disable
+ssh_authorized_principals_file: ""
+ssh_authorized_principals: []

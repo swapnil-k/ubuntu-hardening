@@ -1,0 +1,16 @@
+---
+# Full hardening run — correct order:
+# 1. common  : base setup (users, SSH, sysctl, locale, packages)
+# 2. cis     : CIS Level 1+2 benchmark (may overwrite some PAM/sysctl settings)
+# 3. common  : re-apply our overrides on top of CIS (PAM, shadow, postfix, faillock)
+
+- import_playbook: common.yml
+
+- import_playbook: cis.yml
+
+- name: Post-CIS — re-apply common overrides
+  hosts: "{{ target }}"
+  gather_facts: true
+  become: yes
+  roles:
+    - common
